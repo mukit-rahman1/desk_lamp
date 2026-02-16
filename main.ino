@@ -1,187 +1,140 @@
-#include <Adafruit_NeoPixel.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Adafruit_NeoPixel.h>
 
-// === LED STRIP SETUP ===
-#define LED_PIN        15
-#define NUM_LEDS       15
-#define PIR_SIGNAL     5
-#define BUTTON_MODE    4
+// pins
+#define SDA_PIN 9
+#define SCL_PIN 10
+#define BTN_POWER 4
+#define BTN_MODE  5
+#define LED_PIN   15
 
+// strip + oled
+#define NUM_LEDS 30
+#define OLED_ADDR 0x3C
+#define W 128
+#define H 64
+
+Adafruit_SSD1306 oled1(W, H, &Wire, -1);
+Adafruit_SSD1306 oled2(W, H, &Wire, -1);
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
-bool ledState = false;
-bool staticMode = false;
-bool lastPirState = LOW;
-bool lastModeButtonState = HIGH;
 
-unsigned long previousMillis = 0;
-const unsigned long interval = 200;
-int step = 0;
-bool turningOn = true;
+// state
+bool on = false;
+bool progressive = false;
 
-// === OLED SETUP ===
-#define SDA_PIN              10
-#define SCL_PIN               9
-#define TCA_ADDR           0x70
-const uint8_t CHANNELS[] = {7, 6, 5};
-const char     LETTERS[] = {'M','P','E'};
+// teal
+uint32_t teal;
 
-#define OLED_ADDR          0x3C
-#define SCREEN_WIDTH         128
-#define SCREEN_HEIGHT         64
-#define BAR_WIDTH             22
-#define BAR_HEIGHT             8
-#define SLIDE_STEP_PIX         2
-#define SLIDE_DELAY_MS        12
-#define PAUSE_AFTER_ALL_ANIM 250
-#define TEXT_SIZE              4
+// for progressive animation
+int prog = 0;
+unsigned long lastStep = 0;
+const int stepDelayMs = 60;
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+// simple button memory
+bool lastPower = HIGH;
+bool lastMode  = HIGH;
+unsigned long lastPressPower = 0;
+unsigned long lastPressMode  = 0;
+const int debounceMs = 30;
 
-uint8_t channelsMask() {
-  uint8_t m = 0;
-  for (uint8_t i = 0; i < sizeof(CHANNELS); i++) m |= (1 << CHANNELS[i]);
-  return m;
+void showText(const char *txt) {
+  // left
+  oled1.clearDisplay();
+  oled1.setTextSize(4);
+  oled1.setTextColor(SSD1306_WHITE);
+  oled1.setCursor(20, 20);
+  oled1.print(txt);
+  oled1.display();
+
+  // right
+  oled2.clearDisplay();
+  oled2.setTextSize(4);
+  oled2.setTextColor(SSD1306_WHITE);
+  oled2.setCursor(20, 20);
+  oled2.print(txt);
+  oled2.display();
 }
 
-void tcaSelect(uint8_t ch) {
-  Wire.beginTransmission(TCA_ADDR);
-  Wire.write(ch <= 7 ? (1 << ch) : 0x00);
-  Wire.endTransmission();
+void setStripOff() {
+  strip.clear();
+  strip.show();
 }
 
-void tcaSelectMask(uint8_t mask) {
-  Wire.beginTransmission(TCA_ADDR);
-  Wire.write(mask);
-  Wire.endTransmission();
+void setStripStatic() {
+  for (int i = 0; i < NUM_LEDS; i++) strip.setPixelColor(i, teal);
+  strip.show();
 }
 
-bool initDisplay() {
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR, false, false)) return false;
-  display.clearDisplay();
-  display.display();
-  display.setTextColor(SSD1306_WHITE);
-  return true;
+void doProgressiveStep() {
+  strip.clear();
+  for (int i = 0; i <= prog; i++) strip.setPixelColor(i, teal);
+  strip.show();
+
+  prog++;
+  if (prog >= NUM_LEDS) prog = 0;
 }
 
-void animateSlidingBar() {
-  int y = (SCREEN_HEIGHT - BAR_HEIGHT) / 2;
-  for (int x = -BAR_WIDTH; x <= SCREEN_WIDTH; x += SLIDE_STEP_PIX) {
-    display.clearDisplay();
-    display.fillRect(x, y, BAR_WIDTH, BAR_HEIGHT, SSD1306_WHITE);
-    display.display();
-    delay(SLIDE_DELAY_MS);
+void updateDisplayAndLeds() {
+  prog = 0;
+  lastStep = millis();
+
+  if (!on) {
+    setStripOff();
+    showText("OFF");
+    return;
   }
-  display.clearDisplay();
-  display.display();
-}
 
-void drawCenteredCharToGDDR(char ch) {
-  display.clearDisplay();
-  display.setTextSize(TEXT_SIZE);
-
-  int w = 6 * TEXT_SIZE;
-  int h = 8 * TEXT_SIZE;
-  int x = (SCREEN_WIDTH  - w) / 2;
-  int y = (SCREEN_HEIGHT - h) / 2;
-
-  display.setCursor(x, y);
-  display.write(ch);
-  display.display();
+  if (!progressive) {
+    setStripStatic();
+    showText("S");
+  } else {
+    showText("P");
+  }
 }
 
 void setup() {
-  // === OLED INIT + ANIMATION SEQUENCE ===
+  pinMode(BTN_POWER, INPUT_PULLUP);
+  pinMode(BTN_MODE,  INPUT_PULLUP);
+
   Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setClock(400000);
-  for (uint8_t i = 0; i < sizeof(CHANNELS); i++) {
-    tcaSelect(CHANNELS[i]);
-    if (!initDisplay()) { delay(50); initDisplay(); }
-  }
-  tcaSelect(255);
 
-  for (uint8_t i = 0; i < sizeof(CHANNELS); i++) {
-    tcaSelect(CHANNELS[i]);
-    animateSlidingBar();
-  }
-  tcaSelect(255);
+  oled1.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  oled2.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  showText("OFF");
 
-  uint8_t mask = channelsMask();
-  tcaSelectMask(mask);
-  display.ssd1306_command(SSD1306_DISPLAYOFF);
-  tcaSelect(255);
-
-  const uint8_t n = min((size_t)sizeof(CHANNELS), (size_t)sizeof(LETTERS));
-  for (uint8_t i = 0; i < n; i++) {
-    tcaSelect(CHANNELS[i]);
-    drawCenteredCharToGDDR(LETTERS[i]);
-  }
-  tcaSelect(255);
-
-  delay(PAUSE_AFTER_ALL_ANIM);
-
-  tcaSelectMask(mask);
-  display.ssd1306_command(SSD1306_DISPLAYON);
-  tcaSelect(255);
-
-  // === LED STRIP INIT ===
-  pinMode(PIR_SIGNAL, INPUT);
-  pinMode(BUTTON_MODE, INPUT_PULLUP);
   strip.begin();
-  strip.show();  // start off
+  strip.setBrightness(80);
+  teal = strip.Color(0, 128, 128);
+  setStripOff();
 }
 
 void loop() {
-  // --- PIR TRIGGER HANDLING ---
-  bool pirState = digitalRead(PIR_SIGNAL);
-  if (lastPirState == LOW && pirState == HIGH) {
-    ledState = !ledState;
-    delay(1000);  // debounce for PIR
+  bool p = digitalRead(BTN_POWER);
+  bool m = digitalRead(BTN_MODE);
+
+  // power button 
+  if (p == LOW && lastPower == HIGH && (millis() - lastPressPower) > debounceMs) { //simple 30ms debounce
+    lastPressPower = millis();
+    on = !on;
+    updateDisplayAndLeds();
   }
-  lastPirState = pirState;
+  lastPower = p;
 
-  // --- MODE BUTTON HANDLING ---
-  bool modeButtonState = digitalRead(BUTTON_MODE);
-  if (lastModeButtonState == HIGH && modeButtonState == LOW) {
-    staticMode = !staticMode;
-    delay(200);
+  // mode button, toggle static/progressive
+  if (m == LOW && lastMode == HIGH && (millis() - lastPressMode) > debounceMs) { //simple 30ms debounce
+    lastPressMode = millis();
+    progressive = !progressive;
+    updateDisplayAndLeds();
   }
-  lastModeButtonState = modeButtonState;
+  lastMode = m;
 
-  // --- LED STRIP LOGIC ---
-  if (ledState) {
-    if (staticMode) {
-      for (int i = 0; i < NUM_LEDS; i++) {
-        strip.setPixelColor(i, strip.Color(0, 128, 128)); // teal
-      }
-      strip.show();
-    } else {
-      unsigned long currentMillis = millis();
-      if (currentMillis - previousMillis >= interval) {
-        previousMillis = currentMillis;
-
-        if (turningOn) {
-          strip.setPixelColor(step, strip.Color(0, 128, 128));
-          strip.show();
-          step++;
-          if (step >= NUM_LEDS) {
-            turningOn = false;
-            step = 0;
-          }
-        } else {
-          strip.setPixelColor(step, strip.Color(0, 0, 0));
-          strip.show();
-          step++;
-          if (step >= NUM_LEDS) {
-            turningOn = true;
-            step = 0;
-          }
-        }
-      }
+  // run progressive animation 
+  if (on && progressive) {
+    if (millis() - lastStep > stepDelayMs) {
+      lastStep = millis();
+      doProgressiveStep();
     }
-  } else {
-    strip.clear();
-    strip.show();
   }
 }
